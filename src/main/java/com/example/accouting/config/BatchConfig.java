@@ -5,8 +5,10 @@ import com.example.accouting.processor.AddressItemProcessor;
 import com.example.accouting.repository.AddressRepository;
 import org.springframework.batch.core.Job;
 import org.springframework.batch.core.Step;
+import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
 import org.springframework.batch.core.job.builder.JobBuilder;
 import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.batch.core.repository.support.JobRepositoryFactoryBean;
 import org.springframework.batch.core.step.builder.StepBuilder;
 import org.springframework.batch.item.data.RepositoryItemReader;
 import org.springframework.batch.item.data.RepositoryItemWriter;
@@ -15,6 +17,7 @@ import org.springframework.batch.item.data.builder.RepositoryItemWriterBuilder;
 import org.springframework.batch.item.database.JdbcBatchItemWriter;
 import org.springframework.batch.item.database.builder.JdbcBatchItemWriterBuilder;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -30,15 +33,26 @@ import java.util.Map;
 
 /**
  * Batch configuration optimized for processing large volumes of data (5+ million records)
+ * Uses separate datasources for application data and Spring Batch metadata
  */
 @Configuration
+@EnableBatchProcessing
 public class BatchConfig {
 
     @Autowired
     private AddressRepository addressRepository;
 
     @Autowired
-    private DataSource dataSource;
+    @Qualifier("primaryDataSource")
+    private DataSource primaryDataSource;
+
+    @Autowired
+    @Qualifier("batchDataSource")
+    private DataSource batchDataSource;
+
+    @Autowired
+    @Qualifier("batchTransactionManager")
+    private PlatformTransactionManager batchTransactionManager;
 
     @Value("${batch.chunk.size:1000}")
     private int chunkSize;
@@ -48,6 +62,20 @@ public class BatchConfig {
 
     @Value("${batch.max.threads:4}")
     private int maxThreads;
+
+    /**
+     * Configure a custom JobRepository that uses the batch datasource
+     */
+    @Bean
+    public JobRepository jobRepository() throws Exception {
+        JobRepositoryFactoryBean factory = new JobRepositoryFactoryBean();
+        factory.setDataSource(batchDataSource);
+        factory.setTransactionManager(batchTransactionManager);
+        factory.setIsolationLevelForCreate("ISOLATION_READ_COMMITTED");
+        factory.setTablePrefix("BATCH_");
+        factory.afterPropertiesSet();
+        return factory.getObject();
+    }
 
     /**
      * Configure a paged repository reader for efficient processing of large datasets
@@ -80,7 +108,7 @@ public class BatchConfig {
     @Bean
     public JdbcBatchItemWriter<Address> jdbcBatchWriter() {
         return new JdbcBatchItemWriterBuilder<Address>()
-                .dataSource(dataSource)
+                .dataSource(primaryDataSource)
                 .sql("UPDATE address SET temp_id = :tempID WHERE id = :id")
                 .itemSqlParameterSourceProvider(BeanPropertySqlParameterSource::new)
                 .build();
@@ -111,9 +139,9 @@ public class BatchConfig {
      * Configure the processing step with increased chunk size and parallel processing
      */
     @Bean
-    public Step processAddressStep(JobRepository jobRepository, PlatformTransactionManager transactionManager) {
-        return new StepBuilder("processAddressStep", jobRepository)
-                .<Address, Address>chunk(chunkSize, transactionManager)
+    public Step processAddressStep() throws Exception {
+        return new StepBuilder("processAddressStep", jobRepository())
+                .<Address, Address>chunk(chunkSize, batchTransactionManager)
                 .reader(reader())
                 .processor(processor())
                 .writer(jdbcBatchWriter())
@@ -125,13 +153,12 @@ public class BatchConfig {
      * Configure a step to update all addresses with the final tempID
      */
     @Bean
-    public Step finalUpdateStep(JobRepository jobRepository, PlatformTransactionManager transactionManager, 
-                               AddressItemProcessor processor) {
-        return new StepBuilder("finalUpdateStep", jobRepository)
+    public Step finalUpdateStep(AddressItemProcessor processor) throws Exception {
+        return new StepBuilder("finalUpdateStep", jobRepository())
                 .tasklet((contribution, chunkContext) -> {
                     processor.updateAllAddressesWithFinalTempId();
                     return null;
-                }, transactionManager)
+                }, batchTransactionManager)
                 .build();
     }
 
@@ -139,8 +166,8 @@ public class BatchConfig {
      * Configure the job with both processing and final update steps
      */
     @Bean
-    public Job addressJob(JobRepository jobRepository, Step processAddressStep, Step finalUpdateStep) {
-        return new JobBuilder("addressJob", jobRepository)
+    public Job addressJob(Step processAddressStep, Step finalUpdateStep) throws Exception {
+        return new JobBuilder("addressJob", jobRepository())
                 .start(processAddressStep)
                 .next(finalUpdateStep)
                 .build();

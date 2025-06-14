@@ -65,7 +65,7 @@ public class AddressItemProcessor implements ItemProcessor<Address, Address> {
         processedCount++;
 
         // Only log occasionally for performance reasons
-        if (processedCount % logFrequency == 0) {
+        if (logFrequency > 0 && processedCount % logFrequency == 0) {
             log.info("Processed {} records", processedCount);
         }
 
@@ -79,14 +79,9 @@ public class AddressItemProcessor implements ItemProcessor<Address, Address> {
             knownAccountIds.add(accountId);
             // Assign the current global tempID
             accountTempIdMap.put(accountId, currentGlobalTempId);
-        } else {
-            // This is an existing account ID, so we need a new global tempID
-            currentGlobalTempId = generateTempId();
-
-            // Update all account IDs to use the new tempID
-            // This is done in memory only - the database update is handled in batches by the writer
-            accountTempIdMap.keySet().forEach(id -> accountTempIdMap.put(id, currentGlobalTempId));
         }
+        // We no longer generate a new tempID for existing accounts
+        // This ensures all addresses get the same tempID
 
         // Set the tempID on the current address
         address.setTempID(currentGlobalTempId);
